@@ -40,7 +40,7 @@
 <div class="wtc-root">
   <div id="wtc-app" class="wtc-scroll"></div>
 </div>
-
+<script type="module" src="firebase-client.js"></script>
 <script type="module">
 import {
   watchAuthState, login, registerTrainee, logout,
@@ -152,7 +152,7 @@ function navBar(active){
     <div class="wtc-nav-tabs">${tabs}</div>
     <div class="wtc-nav-user">
       <span class="wtc-role-chip" style="--chip:${roleColor}">${esc(roleLabel)}</span>
-      <span class="wtc-nav-username">${esc(session.username)}</span>
+      <span class="wtc-nav-username">${esc(auth.currentUser.uid)}</span>
       <button class="wtc-btn wtc-btn-ghost" id="wtc-logout">Log out</button>
     </div>
   </div>`;
@@ -763,7 +763,7 @@ function wireProfileForm(existing){
       weaponsMatchTypes: document.getElementById('f-weaponsMatchTypes').value.trim(),
       biography: document.getElementById('f-biography').value.trim(),
       alliesRivals: document.getElementById('f-alliesRivals').value.trim(),
-      username: session.username,
+      username: auth.currentUser.uid,
       updatedAt: Date.now()
     };
 
