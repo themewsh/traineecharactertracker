@@ -1,0 +1,40 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    function isAdmin() { return isSignedIn() && myRole() == 'admin'; }
+    function isTrainerOrAdmin() { return isSignedIn() && (myRole() == 'trainer' || myRole() == 'admin'); }
+
+    // users/{uid} -- account + contact info
+    match /users/{uid} {
+      // trainees/trainers/admins can read their own doc; trainers/admins can read everyone's
+      allow read: if isSignedIn() && (request.auth.uid == uid || isTrainerOrAdmin());
+
+      // self-registration is only ever allowed to create a TRAINEE account.
+      // trainer/admin accounts are created server-side (Admin SDK bypasses these rules).
+      allow create: if isSignedIn()
+                    && request.auth.uid == uid
+                    && request.resource.data.role == 'trainee';
+
+      // a user can edit their own contact info, but can never change their own role
+      allow update: if isSignedIn()
+                    && request.auth.uid == uid
+                    && request.resource.data.role == resource.data.role;
+
+      // only admins can delete accounts, and only via the client for other users
+      allow delete: if isAdmin() && request.auth.uid != uid;
+    }
+
+    // profiles/{uid} -- the wrestling character sheet
+    match /profiles/{uid} {
+      // trainee sees only their own profile; trainers/admins see everyone's
+      allow read: if isSignedIn() && (request.auth.uid == uid || isTrainerOrAdmin());
+      // only the owning trainee can create/edit their own profile
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "wrestling-trainee-character-manager",
+  "private": true,
+  "dependencies": {
+    "firebase-admin": "^12.1.0"
+  }
+}

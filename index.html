@@ -1,0 +1,1005 @@
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+.wtc-root {
+  --ink: #060708;
+  --ink-2: #0E1013;
+  --panel: #121417;
+  --canvas: #F5F6F8;
+  --canvas-dim: #E1E4E9;
+  --line: #262A30;
+  --red: #B31942;
+  --red-dim: #7A1030;
+  --gold: #3C6FF0;
+  --gold-dim: #1F3E85;
+  --amber: #FF6B81;
+  --ink-text: #0B0C0E;
+  --cream-text: #F5F6F8;
+  --muted: #9AA0A8;
+  --blue: #F2F3F5;
+  --purple: #5B8DEF;
+  --font-display: 'Anton', 'Arial Narrow', sans-serif;
+  --font-body: 'Work Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  background: var(--ink);
+  color: var(--cream-text);
+  font-family: var(--font-body);
+  min-height: 100vh;
+  width: 100%;
+  box-sizing: border-box;
+  position: relative;
+}
+.wtc-root *, .wtc-root *::before, .wtc-root *::after { box-sizing: border-box; }
+.wtc-root button { font-family: var(--font-body); cursor: pointer; }
+.wtc-root input, .wtc-root select, .wtc-root textarea { font-family: var(--font-body); }
+.wtc-root ::selection { background: var(--gold); color: #FFFFFF; }
+.wtc-root a { color: var(--gold); }
+.wtc-root :focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.wtc-scroll { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+</style>
+<div class="wtc-root">
+  <div id="wtc-app" class="wtc-scroll"></div>
+</div>
+
+<script type="module">
+import {
+  watchAuthState, login, registerTrainee, logout,
+  fsGet, fsSet, fsDelete, fsListAll,
+  uploadPhoto, uploadThemeSong, createStaffAccount
+} from './firebase-client.js';
+
+function esc(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function nl2br(s){ return esc(s).replace(/\n/g,'<br>'); }
+function fmtDate(ts){ if(!ts) return ''; try{ return new Date(ts).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}); }catch(e){ return ''; } }
+function validEmail(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
+
+/* Maps Firebase Auth error codes to plain-language messages. */
+function friendlyAuthError(err){
+  const code = (err && err.code) || '';
+  const map = {
+    'auth/email-already-in-use': 'That email is already registered.',
+    'auth/invalid-email': 'That email address looks invalid.',
+    'auth/weak-password': 'Password must be at least 6 characters.',
+    'auth/invalid-credential': 'Incorrect email or password.',
+    'auth/user-not-found': 'Incorrect email or password.',
+    'auth/wrong-password': 'Incorrect email or password.',
+    'auth/too-many-requests': 'Too many attempts. Try again in a bit.',
+  };
+  if(map[code]) return map[code];
+  if(err && err.message) return err.message.replace(/^Firebase:\s*/,'').replace(/\s*\(auth\/[^)]+\)\.?$/,'');
+  return 'Something went wrong. Try again.';
+}
+
+/* ---------------- session state ---------------- */
+let session = null;      // {uid, username, role, email}
+let authMode = 'login';  // 'login' | 'register'
+let authError = '';
+let regError = '';
+let trainerCreateMsg = {ok:false, text:''};
+let profileDraft = null; // working copy while editing
+let profileMode = 'view'; // 'view' | 'edit'
+let saveMsg = '';
+
+let rosterQuery = '';
+let rosterAlignment = 'all';
+let rosterProfiles = [];   // cached {uid, username, profile}
+let rosterDetail = null;   // uid currently open in detail
+let adminUsers = [];
+
+const ARCHETYPES = ['Monster','Technician','High-Flyer','Brawler','Powerhouse','Showman/Showwoman','Underdog','Rule-Breaker','Veteran','Other'];
+
+function blankProfile(){
+  return {
+    ringName:'', realName:'', nicknames:'', hometown:'', height:'', weight:'',
+    alignment:'Face',
+    photo:null,
+    ringAttire:'', casualAttire:'',
+    archetype:'Technician', archetypeOther:'',
+    personality:'', catchphrases:'',
+    themeSong:'', entranceDescription:'', themeSongUrl:null, themeSongName:'',
+    sigMoves:['','','','',''],
+    finisherName:'', finisherDesc:'',
+    weaponsMatchTypes:'',
+    biography:'', alliesRivals:'',
+    updatedAt:null
+  };
+}
+
+/* ---------------- app init ---------------- */
+function init(){
+  renderAuth(); // show something immediately while Firebase resolves auth state
+  watchAuthState(async (user)=>{
+    if(!user){
+      session = null;
+      renderAuth();
+      return;
+    }
+    if(session && session.uid === user.uid) return; // already handled by an explicit login/register flow
+    const userDoc = await fsGet('users', user.uid);
+    if(!userDoc){
+      // Auth account exists with no matching account record -- treat as signed out.
+      await logout();
+      session = null;
+      renderAuth();
+      return;
+    }
+    session = {uid: user.uid, username: userDoc.username, role: userDoc.role, email: userDoc.email};
+    routeToHome();
+  });
+}
+
+/* ---------------- render: shell pieces ---------------- */
+function navBar(active){
+  const roleLabel = session.role === 'admin' ? 'Admin' : (session.role === 'trainer' ? 'Trainer' : 'Trainee');
+  const roleColor = session.role === 'admin' ? 'var(--gold)' : (session.role === 'trainer' ? 'var(--blue)' : 'var(--amber)');
+  let tabs = '';
+  if(session.role === 'trainee'){
+    tabs = `<button class="wtc-navtab ${active==='profile'?'active':''}" data-nav="profile">My profile</button>`;
+  } else {
+    tabs = `<button class="wtc-navtab ${active==='roster'?'active':''}" data-nav="roster">Roster</button>`;
+    if(session.role === 'admin'){
+      tabs += `<button class="wtc-navtab ${active==='accounts'?'active':''}" data-nav="accounts">Accounts</button>`;
+    }
+  }
+  return `
+  <div class="wtc-nav">
+    <div class="wtc-nav-brand">
+      <span class="wtc-nav-brand-main">WRESTLING TRAINEE CHARACTER MANAGER</span>
+      <span class="wtc-nav-brand-sub">Locker Room Roster</span>
+    </div>
+    <div class="wtc-nav-tabs">${tabs}</div>
+    <div class="wtc-nav-user">
+      <span class="wtc-role-chip" style="--chip:${roleColor}">${esc(roleLabel)}</span>
+      <span class="wtc-nav-username">${esc(session.username)}</span>
+      <button class="wtc-btn wtc-btn-ghost" id="wtc-logout">Log out</button>
+    </div>
+  </div>`;
+}
+
+function styleBlock(){
+  return `<style>
+  .wtc-nav{display:flex;align-items:center;gap:20px;flex-wrap:wrap;padding:14px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:26px;}
+  .wtc-nav-brand{display:flex;flex-direction:column;line-height:1;margin-right:auto;}
+  .wtc-nav-brand-main{font-family:var(--font-display);letter-spacing:.5px;font-size:14px;color:var(--gold);}
+  .wtc-nav-brand-sub{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-top:3px;}
+  .wtc-nav-tabs{display:flex;gap:6px;}
+  .wtc-navtab{background:transparent;border:1px solid var(--line);color:var(--muted);padding:8px 14px;border-radius:6px;font-size:13px;font-weight:600;letter-spacing:.4px;}
+  .wtc-navtab.active{background:var(--red);border-color:var(--red);color:var(--cream-text);}
+  .wtc-navtab:hover:not(.active){border-color:var(--gold-dim);color:var(--cream-text);}
+  .wtc-nav-user{display:flex;align-items:center;gap:10px;}
+  .wtc-role-chip{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--chip);border:1px solid var(--chip);padding:4px 9px;border-radius:20px;}
+  .wtc-nav-username{font-size:13px;color:var(--muted);}
+  .wtc-btn{border-radius:6px;border:1px solid var(--gold);background:var(--gold);color:var(--ink);font-weight:700;font-size:13px;padding:10px 16px;letter-spacing:.3px;transition:transform .1s ease;}
+  .wtc-btn:hover{transform:translateY(-1px);}
+  .wtc-btn:active{transform:translateY(0);}
+  .wtc-btn-ghost{background:transparent;color:var(--cream-text);border:1px solid var(--line);font-weight:600;}
+  .wtc-btn-ghost:hover{border-color:var(--gold-dim);}
+  .wtc-btn-red{background:var(--red);border-color:var(--red);color:var(--cream-text);}
+  .wtc-btn-sm{padding:7px 12px;font-size:12px;}
+  .wtc-btn:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+  .wtc-field{display:flex;flex-direction:column;gap:6px;margin-bottom:16px;}
+  .wtc-field label{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:600;}
+  .wtc-field .wtc-hint{font-size:11px;color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;}
+  .wtc-field input[type=text], .wtc-field input[type=password], .wtc-field input[type=email], .wtc-field select, .wtc-field textarea{
+    background:var(--ink-2);border:1px solid var(--line);color:var(--cream-text);border-radius:6px;padding:10px 12px;font-size:14px;width:100%;
+  }
+  .wtc-field textarea{min-height:80px;resize:vertical;line-height:1.5;}
+  .wtc-field input:focus,.wtc-field select:focus,.wtc-field textarea:focus{border-color:var(--gold);}
+  .wtc-row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .wtc-row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;}
+  @media(max-width:720px){.wtc-row2,.wtc-row3{grid-template-columns:1fr;}}
+  .wtc-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px;}
+  .wtc-section-title{font-family:var(--font-display);letter-spacing:.5px;font-size:18px;color:var(--gold);margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--line);}
+  .wtc-error{color:#F2A6A6;background:rgba(200,30,58,.15);border:1px solid var(--red-dim);padding:9px 12px;border-radius:6px;font-size:13px;margin-bottom:14px;}
+  .wtc-success{color:#BFE6C7;background:rgba(59,153,68,.12);border:1px solid #3B9944;padding:9px 12px;border-radius:6px;font-size:13px;margin-bottom:14px;}
+  .wtc-note{font-size:12px;color:var(--muted);line-height:1.6;}
+  .wtc-auth-wrap{max-width:460px;margin:40px auto 0;}
+  .wtc-hero{text-align:center;margin-bottom:30px;position:relative;padding:36px 20px;border-radius:12px;
+    background:radial-gradient(ellipse at center, rgba(60,111,240,.18) 0%, rgba(6,7,8,0) 70%), var(--ink-2);
+    border:1px solid var(--line);}
+  .wtc-hero h1{font-family:var(--font-display);font-size:clamp(24px,4.6vw,42px);letter-spacing:1px;margin:0;color:var(--canvas);
+    text-shadow:0 0 24px rgba(60,111,240,.5);}
+  .wtc-hero p{color:var(--muted);margin:8px 0 0;font-size:14px;letter-spacing:1px;text-transform:uppercase;}
+  .wtc-authtabs{display:flex;gap:8px;margin-bottom:18px;}
+  .wtc-authtab{flex:1;background:transparent;border:1px solid var(--line);color:var(--muted);padding:10px;border-radius:6px;font-weight:700;letter-spacing:.5px;font-size:13px;}
+  .wtc-authtab.active{background:var(--red);border-color:var(--red);color:var(--cream-text);}
+  .wtc-demo-note{margin-top:18px;padding:12px 14px;border:1px dashed var(--line);border-radius:8px;font-size:12px;color:var(--muted);}
+  .wtc-ticket{position:relative;background:var(--canvas);color:var(--ink-text);border-radius:12px;padding:26px 24px 22px;overflow:visible;}
+  .wtc-ticket::before{content:'';position:absolute;left:0;right:0;top:-1px;height:12px;
+    background-image:radial-gradient(circle 6.5px, var(--ink) 6.4px, transparent 6.5px);
+    background-size:24px 12px;background-position:0 -6px;background-repeat:repeat-x;}
+  .wtc-card-grid{display:grid;grid-template-columns:220px 1fr;gap:26px;}
+  @media(max-width:640px){.wtc-card-grid{grid-template-columns:1fr;}}
+  .wtc-photo-frame{width:100%;aspect-ratio:3/4;border:3px solid var(--ink);border-radius:8px;overflow:hidden;background:var(--canvas-dim);display:flex;align-items:center;justify-content:center;color:var(--ink-text);opacity:.55;font-size:12px;text-align:center;padding:10px;}
+  .wtc-photo-frame img{width:100%;height:100%;object-fit:cover;display:block;}
+  .wtc-ring-name{font-family:var(--font-display);font-size:34px;letter-spacing:1px;line-height:1;margin:0;}
+  .wtc-nickname{font-size:13px;color:var(--red);font-weight:700;letter-spacing:.5px;margin:6px 0 0;}
+  .wtc-align-badge{display:inline-block;margin-top:10px;font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;padding:5px 10px;border-radius:20px;}
+  .wtc-align-face{background:#E1EBFB;color:#1B3E9E;}
+  .wtc-align-heel{background:#FBE1E7;color:#8E1236;}
+  .wtc-align-tweener{background:#ECEDEF;color:#3A3D42;}
+  .wtc-tape{margin-top:16px;border-top:1px solid var(--line-ink,#0000001a);padding-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px 20px;font-family:var(--font-mono);font-size:12.5px;}
+  .wtc-tape div span.wtc-tape-label{display:block;color:#6b6252;text-transform:uppercase;letter-spacing:1px;font-size:10px;margin-bottom:2px;}
+  .wtc-detail-block{margin-top:20px;}
+  .wtc-detail-block h4{font-family:var(--font-display);font-size:15px;letter-spacing:.6px;color:var(--red);margin:0 0 8px;text-transform:uppercase;}
+  .wtc-detail-block p, .wtc-detail-block li{font-size:14px;line-height:1.65;color:var(--ink-text);}
+  .wtc-detail-block ul{margin:0;padding-left:18px;}
+  .wtc-perf-divider{height:1px;background:var(--line);margin:26px 0;}
+  .wtc-movelist-row{display:flex;gap:10px;align-items:center;margin-bottom:10px;}
+  .wtc-movelist-row input{flex:1;}
+  .wtc-tag{font-size:11px;color:var(--muted);}
+  .wtc-roster-toolbar{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;}
+  .wtc-roster-toolbar input, .wtc-roster-toolbar select{background:var(--ink-2);border:1px solid var(--line);color:var(--cream-text);border-radius:6px;padding:9px 12px;font-size:13px;}
+  .wtc-roster-toolbar input{flex:1;min-width:200px;}
+  .wtc-roster-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;}
+  .wtc-mini-card{background:var(--canvas);color:var(--ink-text);border-radius:10px;padding:14px;cursor:pointer;border:2px solid transparent;transition:border-color .12s ease, transform .12s ease;}
+  .wtc-mini-card:hover{border-color:var(--gold);transform:translateY(-2px);}
+  .wtc-mini-photo{width:100%;aspect-ratio:1/1;border-radius:6px;overflow:hidden;background:var(--canvas-dim);margin-bottom:10px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#8a8172;}
+  .wtc-mini-photo img{width:100%;height:100%;object-fit:cover;}
+  .wtc-mini-name{font-family:var(--font-display);font-size:17px;letter-spacing:.5px;margin:0 0 2px;}
+  .wtc-mini-meta{font-size:11.5px;color:#5b5346;}
+  .wtc-empty{padding:40px 20px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:10px;}
+  .wtc-modal-backdrop{position:fixed;inset:0;background:rgba(10,8,6,.72);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:50;overflow-y:auto;}
+  .wtc-modal{max-width:760px;width:100%;position:relative;}
+  .wtc-modal-close{position:absolute;top:-14px;right:-14px;background:var(--gold);color:var(--ink);border:none;width:34px;height:34px;border-radius:50%;font-weight:800;font-size:16px;}
+  .wtc-table{width:100%;border-collapse:collapse;font-size:13.5px;}
+  .wtc-table th{text-align:left;color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:1px;padding:8px 10px;border-bottom:1px solid var(--line);}
+  .wtc-table td{padding:10px;border-bottom:1px solid var(--line);}
+  .wtc-inline-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:16px;}
+  .wtc-inline-form .wtc-field{margin-bottom:0;min-width:180px;flex:1;}
+  .wtc-tabs-sub{display:flex;gap:8px;margin-bottom:20px;}
+  .wtc-tabs-sub button{background:transparent;border:1px solid var(--line);color:var(--muted);padding:8px 14px;border-radius:6px;font-size:13px;font-weight:600;}
+  .wtc-tabs-sub button.active{background:var(--panel);border-color:var(--gold-dim);color:var(--gold);}
+  </style>`;
+}
+
+/* ---------------- AUTH SCREEN ---------------- */
+function renderAuth(){
+  const app = document.getElementById('wtc-app');
+  app.innerHTML = `
+  ${styleBlock()}
+  <div class="wtc-hero">
+    <h1>WRESTLING TRAINEE CHARACTER MANAGER</h1>
+  </div>
+  <div class="wtc-auth-wrap">
+    <div class="wtc-authtabs">
+      <button class="wtc-authtab ${authMode==='login'?'active':''}" data-auth="login">Log in</button>
+      <button class="wtc-authtab ${authMode==='register'?'active':''}" data-auth="register">Create trainee account</button>
+    </div>
+    <div class="wtc-card">
+      ${authMode==='login' ? renderLoginForm() : renderRegisterForm()}
+    </div>
+    <div class="wtc-demo-note">
+      There are three account types: trainee, trainer, and admin. Trainee accounts are self-serve here. Trainer and admin accounts can only be created by an existing admin, from the Accounts tab.
+      <br><br>Sign in with your email address. Trainee profiles are private &mdash; only you and your trainers/admins can see them, enforced by the backend, not just by this page.
+    </div>
+  </div>`;
+
+  document.querySelectorAll('[data-auth]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ authMode = btn.dataset.auth; authError=''; regError=''; renderAuth(); });
+  });
+  wireAuthForms();
+}
+
+function renderLoginForm(){
+  return `
+  ${authError ? `<div class="wtc-error">${esc(authError)}</div>` : ''}
+  <form id="wtc-login-form">
+    <div class="wtc-field"><label>Email</label><input type="email" id="wtc-login-email" autocomplete="username" required></div>
+    <div class="wtc-field"><label>Password</label><input type="password" id="wtc-login-pass" autocomplete="current-password" required></div>
+    <button type="submit" class="wtc-btn" style="width:100%">Log in</button>
+  </form>`;
+}
+function contactFieldsHtml(prefix, v){
+  v = v || {};
+  const social = v.social || ['','',''];
+  return `
+    <div class="wtc-field"><label>Email</label><input type="email" id="${prefix}-email" value="${esc(v.email||'')}" required></div>
+    <div class="wtc-field"><label>Phone number <span class="wtc-hint">&mdash; optional</span></label><input type="text" id="${prefix}-phone" value="${esc(v.phone||'')}"></div>
+    <div class="wtc-field"><label>Social media links <span class="wtc-hint">&mdash; up to 3, optional</span></label>
+      <input type="text" id="${prefix}-social1" placeholder="https://instagram.com/yourhandle" value="${esc(social[0]||'')}" style="margin-bottom:8px;">
+      <input type="text" id="${prefix}-social2" placeholder="https://twitter.com/yourhandle" value="${esc(social[1]||'')}" style="margin-bottom:8px;">
+      <input type="text" id="${prefix}-social3" placeholder="https://tiktok.com/@yourhandle" value="${esc(social[2]||'')}">
+    </div>`;
+}
+function readContactFields(prefix){
+  return {
+    email: document.getElementById(prefix+'-email').value.trim(),
+    phone: document.getElementById(prefix+'-phone').value.trim(),
+    social: [
+      document.getElementById(prefix+'-social1').value.trim(),
+      document.getElementById(prefix+'-social2').value.trim(),
+      document.getElementById(prefix+'-social3').value.trim()
+    ].filter(Boolean)
+  };
+}
+
+function renderRegisterForm(){
+  return `
+  ${regError ? `<div class="wtc-error">${esc(regError)}</div>` : ''}
+  <div class="wtc-note" style="margin-bottom:14px;">This creates a trainee account. Trainee profiles are private &mdash; only you and your trainers/admins can see them. You'll log in with your email.</div>
+  <form id="wtc-register-form">
+    <div class="wtc-field"><label>Choose a display name</label><input type="text" id="wtc-reg-user" required></div>
+    <div class="wtc-field"><label>Choose a password</label><input type="password" id="wtc-reg-pass" required></div>
+    <div class="wtc-field"><label>Confirm password</label><input type="password" id="wtc-reg-pass2" required></div>
+    ${contactFieldsHtml('wtc-reg')}
+    <button type="submit" class="wtc-btn" style="width:100%">Create trainee account</button>
+  </form>`;
+}
+
+function wireAuthForms(){
+  const loginForm = document.getElementById('wtc-login-form');
+  if(loginForm){
+    loginForm.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const email = document.getElementById('wtc-login-email').value.trim();
+      const pass = document.getElementById('wtc-login-pass').value;
+      try{
+        const user = await login(email, pass);
+        const userDoc = await fsGet('users', user.uid);
+        if(!userDoc){
+          authError = 'No account record found for this login.';
+          renderAuth();
+          return;
+        }
+        session = {uid: user.uid, username: userDoc.username, role: userDoc.role, email: userDoc.email};
+        authError = '';
+        routeToHome();
+      }catch(err){
+        authError = friendlyAuthError(err);
+        renderAuth();
+      }
+    });
+  }
+  const regForm = document.getElementById('wtc-register-form');
+  if(regForm){
+    regForm.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const username = document.getElementById('wtc-reg-user').value.trim();
+      const pass = document.getElementById('wtc-reg-pass').value;
+      const pass2 = document.getElementById('wtc-reg-pass2').value;
+      if(username.length < 2){ regError = 'Enter a display name.'; renderAuth(); return; }
+      if(pass.length < 6){ regError = 'Password must be at least 6 characters.'; renderAuth(); return; }
+      if(pass !== pass2){ regError = 'Passwords do not match.'; renderAuth(); return; }
+      const contact = readContactFields('wtc-reg');
+      if(!validEmail(contact.email)){ regError = 'Enter a valid email address.'; renderAuth(); return; }
+      try{
+        const user = await registerTrainee(contact.email, pass);
+        const userDoc = {username, email: contact.email, phone: contact.phone, social: contact.social, role:'trainee', createdAt: Date.now()};
+        await fsSet('users', user.uid, userDoc);
+        session = {uid: user.uid, username, role:'trainee', email: contact.email};
+        regError = '';
+        routeToHome();
+      }catch(err){
+        regError = friendlyAuthError(err);
+        renderAuth();
+      }
+    });
+  }
+}
+
+function routeToHome(){
+  if(session.role === 'trainee'){ renderTraineeScreen(); }
+  else { renderRosterScreen(); }
+}
+
+function wireNav(active){
+  document.getElementById('wtc-logout').addEventListener('click', async ()=>{
+    await logout();
+    session = null; profileDraft=null; profileMode='view'; rosterDetail=null;
+    renderAuth();
+  });
+  document.querySelectorAll('[data-nav]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const target = btn.dataset.nav;
+      if(target==='profile') renderTraineeScreen();
+      else if(target==='roster') renderRosterScreen();
+      else if(target==='accounts') renderAccountsScreen();
+    });
+  });
+}
+
+/* ---------------- TRAINEE SCREEN ---------------- */
+async function renderTraineeScreen(){
+  const app = document.getElementById('wtc-app');
+  const existing = await fsGet('profiles', session.uid);
+  if(!existing){ profileMode = 'edit'; profileDraft = blankProfile(); }
+  else if(!profileDraft){ profileDraft = JSON.parse(JSON.stringify(existing)); }
+
+  app.innerHTML = `${styleBlock()}${navBar('profile')}
+  <div id="wtc-trainee-body"></div>`;
+  wireNav('profile');
+
+  const body = document.getElementById('wtc-trainee-body');
+  if(profileMode === 'view' && existing){
+    body.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h2 style="font-family:var(--font-display);letter-spacing:.5px;margin:0;color:var(--canvas);">Your character card</h2>
+        <button class="wtc-btn" id="wtc-edit-btn">Edit profile</button>
+      </div>
+      ${renderProfileCard(existing)}
+    `;
+    document.getElementById('wtc-edit-btn').addEventListener('click', ()=>{
+      profileDraft = JSON.parse(JSON.stringify(existing));
+      profileMode='edit'; saveMsg='';
+      renderTraineeScreen();
+    });
+  } else {
+    body.innerHTML = `
+      <h2 style="font-family:var(--font-display);letter-spacing:.5px;margin:0 0 16px;color:var(--canvas);">
+        ${existing ? 'Edit your character' : 'Build your character'}
+      </h2>
+      ${renderProfileForm(existing)}
+    `;
+    wireProfileForm(existing);
+  }
+}
+
+function alignmentBadgeClass(a){
+  if(a==='Heel') return 'wtc-align-heel';
+  if(a==='Tweener') return 'wtc-align-tweener';
+  return 'wtc-align-face';
+}
+function alignmentMeaning(a){
+  if(a==='Heel') return 'Heel &middot; plays the villain';
+  if(a==='Tweener') return 'Tweener &middot; neutral, swings either way';
+  return 'Face &middot; plays the hero';
+}
+
+function renderProfileCard(p){
+  const archetype = p.archetype === 'Other' ? (p.archetypeOther || 'Other') : p.archetype;
+  const moves = (p.sigMoves||[]).filter(m=>m && m.trim());
+  const catchphrases = (p.catchphrases||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  const photoHtml = p.photo
+    ? `<img src="${p.photo}" alt="${esc(p.ringName)} photo">`
+    : `No photo uploaded`;
+  return `
+  <div class="wtc-ticket">
+    <div class="wtc-card-grid">
+      <div>
+        <div class="wtc-photo-frame">${photoHtml}</div>
+        <div class="wtc-tape">
+          <div><span class="wtc-tape-label">Height</span>${esc(p.height)||'&mdash;'}</div>
+          <div><span class="wtc-tape-label">Weight</span>${esc(p.weight)||'&mdash;'}</div>
+          <div><span class="wtc-tape-label">Billed from</span>${esc(p.hometown)||'&mdash;'}</div>
+          <div><span class="wtc-tape-label">Archetype</span>${esc(archetype)||'&mdash;'}</div>
+        </div>
+      </div>
+      <div>
+        <p class="wtc-ring-name">${esc(p.ringName)||'Unnamed wrestler'}</p>
+        ${p.nicknames ? `<p class="wtc-nickname">"${esc(p.nicknames)}"</p>` : ''}
+        <span class="wtc-align-badge ${alignmentBadgeClass(p.alignment)}">${esc(p.alignment)}</span>
+        <span style="margin-left:8px;font-size:12px;color:#6b6252;">${alignmentMeaning(p.alignment)}</span>
+
+        ${p.realName ? `<div class="wtc-detail-block"><h4>Real name</h4><p>${esc(p.realName)}</p></div>` : ''}
+
+        ${catchphrases.length ? `<div class="wtc-detail-block"><h4>Catchphrases</h4><ul>${catchphrases.map(c=>`<li>&ldquo;${esc(c)}&rdquo;</li>`).join('')}</ul></div>` : ''}
+
+        ${p.personality ? `<div class="wtc-detail-block"><h4>Personality and attitude</h4><p>${nl2br(p.personality)}</p></div>` : ''}
+      </div>
+    </div>
+
+    <div class="wtc-perf-divider"></div>
+
+    <div class="wtc-row2" style="grid-template-columns:1fr 1fr;">
+      <div>
+        <div class="wtc-detail-block" style="margin-top:0;">
+          <h4>Ring attire</h4><p>${p.ringAttire ? nl2br(p.ringAttire) : '&mdash;'}</p>
+        </div>
+        <div class="wtc-detail-block">
+          <h4>Casual attire</h4><p>${p.casualAttire ? nl2br(p.casualAttire) : '&mdash;'}</p>
+        </div>
+      </div>
+      <div>
+        <div class="wtc-detail-block" style="margin-top:0;">
+          <h4>Theme song</h4><p>${p.themeSong ? esc(p.themeSong) : '&mdash;'}</p>
+          ${p.themeSongUrl ? `<audio controls style="width:100%;max-width:320px;margin-top:6px;" src="${p.themeSongUrl}"></audio><div class="wtc-tag" style="margin-top:4px;">${esc(p.themeSongName||'theme-song')}</div>` : ''}
+        </div>
+        <div class="wtc-detail-block">
+          <h4>Entrance walk-out</h4><p>${p.entranceDescription ? nl2br(p.entranceDescription) : '&mdash;'}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="wtc-perf-divider"></div>
+
+    <div class="wtc-detail-block" style="margin-top:0;">
+      <h4>Signature moves</h4>
+      ${moves.length ? `<ul>${moves.map(m=>`<li>${esc(m)}</li>`).join('')}</ul>` : '<p>&mdash;</p>'}
+    </div>
+    <div class="wtc-detail-block">
+      <h4>Finishing move</h4>
+      <p><strong>${esc(p.finisherName)||'Unnamed finisher'}</strong>${p.finisherDesc ? ' &mdash; '+nl2br(p.finisherDesc) : ''}</p>
+    </div>
+    <div class="wtc-detail-block">
+      <h4>Weapons and favorite match types</h4>
+      <p>${p.weaponsMatchTypes ? nl2br(p.weaponsMatchTypes) : '&mdash;'}</p>
+    </div>
+
+    <div class="wtc-perf-divider"></div>
+
+    <div class="wtc-detail-block" style="margin-top:0;">
+      <h4>Biography and career origins</h4>
+      <p>${p.biography ? nl2br(p.biography) : '&mdash;'}</p>
+    </div>
+    <div class="wtc-detail-block">
+      <h4>Notable allies and rivals</h4>
+      <p>${p.alliesRivals ? nl2br(p.alliesRivals) : '&mdash;'}</p>
+    </div>
+
+    ${p.updatedAt ? `<div class="wtc-note" style="margin-top:16px;">Last updated ${fmtDate(p.updatedAt)}</div>` : ''}
+  </div>`;
+}
+
+function renderProfileForm(existing){
+  const p = profileDraft;
+  const sig = (p.sigMoves && p.sigMoves.length===5) ? p.sigMoves : ['','','','',''];
+  return `
+  ${saveMsg ? `<div class="wtc-success">${esc(saveMsg)}</div>` : ''}
+  <form id="wtc-profile-form">
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">Basic info</h3>
+      <div class="wtc-row2">
+        <div class="wtc-field"><label>Ring name</label><input type="text" id="f-ringName" value="${esc(p.ringName)}" required></div>
+        <div class="wtc-field"><label>Real name</label><input type="text" id="f-realName" value="${esc(p.realName)}"></div>
+      </div>
+      <div class="wtc-row2">
+        <div class="wtc-field"><label>Nickname(s)</label><input type="text" id="f-nicknames" value="${esc(p.nicknames)}"></div>
+        <div class="wtc-field"><label>Hometown / billed from</label><input type="text" id="f-hometown" value="${esc(p.hometown)}"></div>
+      </div>
+      <div class="wtc-row3">
+        <div class="wtc-field"><label>Height</label><input type="text" id="f-height" placeholder="6'2&quot;" value="${esc(p.height)}"></div>
+        <div class="wtc-field"><label>Weight</label><input type="text" id="f-weight" placeholder="230 lbs" value="${esc(p.weight)}"></div>
+        <div class="wtc-field"><label>Alignment</label>
+          <select id="f-alignment">
+            <option value="Face" ${p.alignment==='Face'?'selected':''}>Face (good)</option>
+            <option value="Heel" ${p.alignment==='Heel'?'selected':''}>Heel (bad)</option>
+            <option value="Tweener" ${p.alignment==='Tweener'?'selected':''}>Tweener (neutral)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">Look and appearance</h3>
+      <div class="wtc-field">
+        <label>Photo <span class="wtc-hint">&mdash; up to 5MB</span></label>
+        <input type="file" id="f-photo" accept="image/*">
+        <div id="f-photo-error"></div>
+        <div id="f-photo-preview" style="margin-top:10px;max-width:160px;">
+          ${p.photo ? `<img src="${p.photo}" style="width:100%;border-radius:6px;border:2px solid var(--line);">` : ''}
+        </div>
+      </div>
+      <div class="wtc-field"><label>Ring attire</label><textarea id="f-ringAttire">${esc(p.ringAttire)}</textarea></div>
+      <div class="wtc-field"><label>Casual attire</label><textarea id="f-casualAttire">${esc(p.casualAttire)}</textarea></div>
+    </div>
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">Gimmick info</h3>
+      <div class="wtc-row2">
+        <div class="wtc-field"><label>Character archetype</label>
+          <select id="f-archetype">
+            ${ARCHETYPES.map(a=>`<option value="${a}" ${p.archetype===a?'selected':''}>${a}</option>`).join('')}
+          </select>
+        </div>
+        <div class="wtc-field" id="f-archetypeOther-wrap" style="${p.archetype==='Other'?'':'display:none;'}">
+          <label>Describe the archetype</label>
+          <input type="text" id="f-archetypeOther" value="${esc(p.archetypeOther)}">
+        </div>
+      </div>
+      <div class="wtc-field"><label>Personality and attitude</label><textarea id="f-personality">${esc(p.personality)}</textarea></div>
+      <div class="wtc-field"><label>Catchphrase(s) <span class="wtc-hint">&mdash; one per line</span></label><textarea id="f-catchphrases">${esc(p.catchphrases)}</textarea></div>
+    </div>
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">Entrance</h3>
+      <div class="wtc-field"><label>Theme song</label><input type="text" id="f-themeSong" value="${esc(p.themeSong)}" placeholder="Song title / artist"></div>
+      <div class="wtc-field">
+        <label>Theme song file <span class="wtc-hint">&mdash; optional, up to 10MB</span></label>
+        <input type="file" id="f-themeSongFile" accept="audio/*">
+        <div id="f-themeSong-error"></div>
+        <div id="f-themeSong-preview" style="margin-top:8px;">
+          ${p.themeSongUrl ? `<div class="wtc-tag">Current file: ${esc(p.themeSongName||'theme-song')}</div>
+            <audio controls style="width:100%;max-width:320px;margin-top:6px;" src="${p.themeSongUrl}"></audio>
+            <button type="button" class="wtc-btn wtc-btn-ghost wtc-btn-sm" id="f-themeSong-remove" style="margin-top:6px;display:block;">Remove theme song file</button>` : ''}
+        </div>
+      </div>
+      <div class="wtc-field"><label>Entrance walk-out description</label><textarea id="f-entranceDescription">${esc(p.entranceDescription)}</textarea></div>
+    </div>
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">Moveset</h3>
+      <div class="wtc-field">
+        <label>Standard signature moves <span class="wtc-hint">&mdash; give at least 3, up to 5</span></label>
+        ${sig.map((m,i)=>`
+          <div class="wtc-movelist-row">
+            <span class="wtc-tag" style="width:16px;">${i+1}</span>
+            <input type="text" class="f-sigMove" data-idx="${i}" value="${esc(m)}" placeholder="${i<3?'Required':'Optional'}">
+          </div>`).join('')}
+      </div>
+      <div class="wtc-row2">
+        <div class="wtc-field"><label>Finishing move name</label><input type="text" id="f-finisherName" value="${esc(p.finisherName)}" required></div>
+        <div class="wtc-field"><label>Finishing move description</label><input type="text" id="f-finisherDesc" value="${esc(p.finisherDesc)}"></div>
+      </div>
+      <div class="wtc-field"><label>Favorite/common weapons or match types</label><textarea id="f-weaponsMatchTypes">${esc(p.weaponsMatchTypes)}</textarea></div>
+    </div>
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">History and background</h3>
+      <div class="wtc-field"><label>Short biography / career origins</label><textarea id="f-biography" style="min-height:120px;">${esc(p.biography)}</textarea></div>
+      <div class="wtc-field"><label>Notable allies or rivals</label><textarea id="f-alliesRivals">${esc(p.alliesRivals)}</textarea></div>
+    </div>
+
+    <div id="wtc-form-error"></div>
+    <div style="display:flex;gap:10px;">
+      <button type="submit" class="wtc-btn">Save profile</button>
+      ${existing ? `<button type="button" class="wtc-btn wtc-btn-ghost" id="wtc-cancel-edit">Cancel</button>` : ''}
+    </div>
+  </form>`;
+}
+
+function wireProfileForm(existing){
+  const archSel = document.getElementById('f-archetype');
+  archSel.addEventListener('change', ()=>{
+    document.getElementById('f-archetypeOther-wrap').style.display = archSel.value==='Other' ? '' : 'none';
+  });
+
+  const photoInput = document.getElementById('f-photo');
+  photoInput.addEventListener('change', async ()=>{
+    const errEl = document.getElementById('f-photo-error');
+    errEl.innerHTML = '';
+    const file = photoInput.files[0];
+    if(!file) return;
+    if(file.size > 5*1024*1024){
+      errEl.innerHTML = '<div class="wtc-error" style="margin-top:8px;">That image is over 5MB. Choose a smaller file.</div>';
+      photoInput.value='';
+      return;
+    }
+    if(!file.type.startsWith('image/')){
+      errEl.innerHTML = '<div class="wtc-error" style="margin-top:8px;">Please upload an image file.</div>';
+      photoInput.value='';
+      return;
+    }
+    document.getElementById('f-photo-preview').innerHTML = '<div class="wtc-tag">Uploading&hellip;</div>';
+    try{
+      const url = await uploadPhoto(session.uid, file);
+      profileDraft.photo = url;
+      document.getElementById('f-photo-preview').innerHTML = `<img src="${url}" style="width:100%;border-radius:6px;border:2px solid var(--line);">`;
+    }catch(err){
+      errEl.innerHTML = `<div class="wtc-error" style="margin-top:8px;">${esc(err.message || 'Could not upload that image.')}</div>`;
+      document.getElementById('f-photo-preview').innerHTML = '';
+    }
+  });
+
+  const themeSongInput = document.getElementById('f-themeSongFile');
+  themeSongInput.addEventListener('change', async ()=>{
+    const errEl = document.getElementById('f-themeSong-error');
+    errEl.innerHTML = '';
+    const file = themeSongInput.files[0];
+    if(!file) return;
+    if(file.size > 10*1024*1024){
+      errEl.innerHTML = '<div class="wtc-error" style="margin-top:8px;">That file is over 10MB. Choose a smaller file.</div>';
+      themeSongInput.value='';
+      return;
+    }
+    if(!file.type.startsWith('audio/')){
+      errEl.innerHTML = '<div class="wtc-error" style="margin-top:8px;">Please upload an audio file.</div>';
+      themeSongInput.value='';
+      return;
+    }
+    document.getElementById('f-themeSong-preview').innerHTML = '<div class="wtc-tag">Uploading&hellip;</div>';
+    try{
+      const url = await uploadThemeSong(session.uid, file);
+      profileDraft.themeSongUrl = url;
+      profileDraft.themeSongName = file.name;
+      document.getElementById('f-themeSong-preview').innerHTML =
+        `<div class="wtc-tag">Selected: ${esc(file.name)}</div>
+         <audio controls style="width:100%;max-width:320px;margin-top:6px;" src="${url}"></audio>`;
+    }catch(err){
+      errEl.innerHTML = `<div class="wtc-error" style="margin-top:8px;">${esc(err.message || 'Could not upload that file.')}</div>`;
+      document.getElementById('f-themeSong-preview').innerHTML = '';
+    }
+  });
+  const themeRemoveBtn = document.getElementById('f-themeSong-remove');
+  if(themeRemoveBtn){
+    themeRemoveBtn.addEventListener('click', ()=>{
+      profileDraft.themeSongUrl = null;
+      profileDraft.themeSongName = '';
+      document.getElementById('f-themeSong-preview').innerHTML = '<div class="wtc-tag">Theme song file removed.</div>';
+    });
+  }
+
+  const cancelBtn = document.getElementById('wtc-cancel-edit');
+  if(cancelBtn){
+    cancelBtn.addEventListener('click', ()=>{
+      profileMode='view'; profileDraft=null; saveMsg='';
+      renderTraineeScreen();
+    });
+  }
+
+  document.getElementById('wtc-profile-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const errBox = document.getElementById('wtc-form-error');
+    errBox.innerHTML='';
+
+    const sigMoves = Array.from(document.querySelectorAll('.f-sigMove')).map(i=>i.value.trim());
+    const filledMoves = sigMoves.filter(Boolean);
+    if(filledMoves.length < 3){
+      errBox.innerHTML = `<div class="wtc-error">Add at least 3 signature moves.</div>`;
+      return;
+    }
+    const ringName = document.getElementById('f-ringName').value.trim();
+    const finisherName = document.getElementById('f-finisherName').value.trim();
+    if(!ringName || !finisherName){
+      errBox.innerHTML = `<div class="wtc-error">Ring name and finishing move name are required.</div>`;
+      return;
+    }
+
+    const updated = {
+      ringName,
+      realName: document.getElementById('f-realName').value.trim(),
+      nicknames: document.getElementById('f-nicknames').value.trim(),
+      hometown: document.getElementById('f-hometown').value.trim(),
+      height: document.getElementById('f-height').value.trim(),
+      weight: document.getElementById('f-weight').value.trim(),
+      alignment: document.getElementById('f-alignment').value,
+      photo: profileDraft.photo || null,
+      ringAttire: document.getElementById('f-ringAttire').value.trim(),
+      casualAttire: document.getElementById('f-casualAttire').value.trim(),
+      archetype: document.getElementById('f-archetype').value,
+      archetypeOther: document.getElementById('f-archetypeOther') ? document.getElementById('f-archetypeOther').value.trim() : '',
+      personality: document.getElementById('f-personality').value.trim(),
+      catchphrases: document.getElementById('f-catchphrases').value.trim(),
+      themeSong: document.getElementById('f-themeSong').value.trim(),
+      themeSongUrl: profileDraft.themeSongUrl || null,
+      themeSongName: profileDraft.themeSongName || '',
+      entranceDescription: document.getElementById('f-entranceDescription').value.trim(),
+      sigMoves,
+      finisherName,
+      finisherDesc: document.getElementById('f-finisherDesc').value.trim(),
+      weaponsMatchTypes: document.getElementById('f-weaponsMatchTypes').value.trim(),
+      biography: document.getElementById('f-biography').value.trim(),
+      alliesRivals: document.getElementById('f-alliesRivals').value.trim(),
+      username: session.username,
+      updatedAt: Date.now()
+    };
+
+    let ok = true;
+    try{
+      await fsSet('profiles', session.uid, updated);
+    }catch(err){
+      ok = false;
+      errBox.innerHTML = `<div class="wtc-error">${esc(err.message || 'Could not save right now. Try again.')}</div>`;
+    }
+    if(!ok) return;
+    profileMode='view'; profileDraft=null; saveMsg='Profile saved.';
+    renderTraineeScreen();
+  });
+}
+
+/* ---------------- ROSTER SCREEN (trainer + admin) ---------------- */
+async function loadRoster(){
+  const docs = await fsListAll('profiles');
+  const list = docs.map(d => ({ uid: d.id, username: d.username || d.id, profile: d }));
+  list.sort((a,b)=> (a.profile.ringName||a.username).localeCompare(b.profile.ringName||b.username));
+  rosterProfiles = list;
+}
+
+async function renderRosterScreen(){
+  const app = document.getElementById('wtc-app');
+  app.innerHTML = `${styleBlock()}${navBar('roster')}
+  <div id="wtc-roster-body"><div class="wtc-note">Loading roster&hellip;</div></div>`;
+  wireNav('roster');
+  await loadRoster();
+  drawRoster();
+}
+
+function drawRoster(){
+  const body = document.getElementById('wtc-roster-body');
+  const filtered = rosterProfiles.filter(r=>{
+    const matchesQuery = !rosterQuery || (
+      (r.profile.ringName||'').toLowerCase().includes(rosterQuery) ||
+      (r.username||'').toLowerCase().includes(rosterQuery) ||
+      (r.profile.hometown||'').toLowerCase().includes(rosterQuery) ||
+      (r.profile.archetype||'').toLowerCase().includes(rosterQuery)
+    );
+    const matchesAlign = rosterAlignment==='all' || r.profile.alignment === rosterAlignment;
+    return matchesQuery && matchesAlign;
+  });
+
+  body.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <h2 style="font-family:var(--font-display);letter-spacing:.5px;margin:0;color:var(--canvas);">Trainee roster</h2>
+      <span class="wtc-note">${rosterProfiles.length} character${rosterProfiles.length===1?'':'s'} on file</span>
+    </div>
+    <div class="wtc-roster-toolbar">
+      <input type="text" id="wtc-roster-search" placeholder="Search ring name, hometown, archetype, or name" value="${esc(rosterQuery)}">
+      <select id="wtc-roster-align">
+        <option value="all" ${rosterAlignment==='all'?'selected':''}>All alignments</option>
+        <option value="Face" ${rosterAlignment==='Face'?'selected':''}>Face</option>
+        <option value="Heel" ${rosterAlignment==='Heel'?'selected':''}>Heel</option>
+        <option value="Tweener" ${rosterAlignment==='Tweener'?'selected':''}>Tweener</option>
+      </select>
+    </div>
+    ${filtered.length ? `<div class="wtc-roster-grid">${filtered.map(r=>rosterMiniCard(r)).join('')}</div>` : `<div class="wtc-empty">No characters match. Adjust the search or filter.</div>`}
+    ${rosterDetail ? rosterDetailModal(rosterDetail) : ''}
+  `;
+
+  document.getElementById('wtc-roster-search').addEventListener('input', (e)=>{
+    rosterQuery = e.target.value.toLowerCase();
+    drawRoster();
+    document.getElementById('wtc-roster-search').focus();
+    const el = document.getElementById('wtc-roster-search'); el.selectionStart = el.selectionEnd = el.value.length;
+  });
+  document.getElementById('wtc-roster-align').addEventListener('change', (e)=>{
+    rosterAlignment = e.target.value;
+    drawRoster();
+  });
+  document.querySelectorAll('[data-open-detail]').forEach(el=>{
+    el.addEventListener('click', ()=>{ rosterDetail = el.dataset.openDetail; drawRoster(); });
+  });
+  const closeBtn = document.getElementById('wtc-modal-close');
+  if(closeBtn){
+    closeBtn.addEventListener('click', ()=>{ rosterDetail=null; drawRoster(); });
+    document.getElementById('wtc-modal-backdrop').addEventListener('click', (e)=>{
+      if(e.target.id==='wtc-modal-backdrop'){ rosterDetail=null; drawRoster(); }
+    });
+  }
+}
+
+function rosterMiniCard(r){
+  const p = r.profile;
+  const photoHtml = p.photo ? `<img src="${p.photo}" alt="">` : 'No photo';
+  return `
+  <div class="wtc-mini-card" data-open-detail="${esc(r.uid)}">
+    <div class="wtc-mini-photo">${photoHtml}</div>
+    <p class="wtc-mini-name">${esc(p.ringName)||'Unnamed'}</p>
+    <div class="wtc-mini-meta">${esc(p.archetype==='Other'?p.archetypeOther:p.archetype)||'&mdash;'} &middot; ${esc(p.alignment)}</div>
+    <div class="wtc-mini-meta">${esc(p.hometown)||'&mdash;'}</div>
+  </div>`;
+}
+
+function rosterDetailModal(uid){
+  const r = rosterProfiles.find(x=>x.uid===uid);
+  if(!r) return '';
+  return `
+  <div class="wtc-modal-backdrop" id="wtc-modal-backdrop">
+    <div class="wtc-modal">
+      <button class="wtc-modal-close" id="wtc-modal-close" aria-label="Close">&times;</button>
+      <div class="wtc-note" style="color:var(--muted);margin-bottom:10px;">Trainee: ${esc(r.username)}</div>
+      ${renderProfileCard(r.profile)}
+    </div>
+  </div>`;
+}
+
+/* ---------------- ADMIN: ACCOUNTS SCREEN ---------------- */
+async function loadUsers(){
+  const docs = await fsListAll('users');
+  docs.sort((a,b)=> (a.username||'').localeCompare(b.username||''));
+  adminUsers = docs;
+}
+
+async function renderAccountsScreen(){
+  const app = document.getElementById('wtc-app');
+  app.innerHTML = `${styleBlock()}${navBar('accounts')}
+  <div id="wtc-accounts-body"><div class="wtc-note">Loading accounts&hellip;</div></div>`;
+  wireNav('accounts');
+  await loadUsers();
+  drawAccounts();
+}
+
+function contactCellHtml(u){
+  const social = (u.social||[]).filter(Boolean);
+  return `
+    <div style="font-size:12.5px;">${esc(u.email)||'&mdash;'}</div>
+    ${u.phone ? `<div class="wtc-tag">${esc(u.phone)}</div>` : ''}
+    ${social.length ? `<div style="display:flex;flex-direction:column;gap:2px;margin-top:4px;">
+      ${social.map(s=>`<a href="${esc(s)}" target="_blank" rel="noopener" style="font-size:11px;">${esc(s)}</a>`).join('')}
+    </div>` : ''}
+  `;
+}
+
+function roleBadge(role){
+  const color = role==='admin' ? 'var(--gold)' : (role==='trainer' ? 'var(--blue)' : 'var(--amber)');
+  return `<span class="wtc-role-chip" style="--chip:${color}">${esc(role)}</span>`;
+}
+
+function drawAccounts(){
+  const body = document.getElementById('wtc-accounts-body');
+  body.innerHTML = `
+    <h2 style="font-family:var(--font-display);letter-spacing:.5px;margin:0 0 16px;color:var(--canvas);">Accounts</h2>
+
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <h3 class="wtc-section-title">Create a staff account</h3>
+      <div class="wtc-note" style="margin-bottom:12px;">There are three account types. Trainees self-register. Trainer and admin accounts can only be created here, by an existing admin. Trainers can browse every trainee profile; admins can additionally manage accounts.</div>
+      ${trainerCreateMsg.text ? `<div class="${trainerCreateMsg.ok?'wtc-success':'wtc-error'}">${esc(trainerCreateMsg.text)}</div>` : ''}
+      <form id="wtc-trainer-form">
+        <div class="wtc-row3">
+          <div class="wtc-field"><label>Display name</label><input type="text" id="wtc-tr-user" required></div>
+          <div class="wtc-field"><label>Temporary password</label><input type="text" id="wtc-tr-pass" required></div>
+          <div class="wtc-field">
+            <label>Role</label>
+            <select id="wtc-tr-role">
+              <option value="trainer">Trainer</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+        </div>
+        <div class="wtc-row2">
+          ${contactFieldsHtml('wtc-tr')}
+        </div>
+        <button type="submit" class="wtc-btn">Create account</button>
+      </form>
+    </div>
+
+    <div class="wtc-card">
+      <h3 class="wtc-section-title">All accounts (${adminUsers.length})</h3>
+      <div style="overflow-x:auto;">
+      <table class="wtc-table">
+        <thead><tr><th>Name</th><th>Role</th><th>Contact</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          ${adminUsers.map(u=>`
+            <tr>
+              <td>${esc(u.username)}</td>
+              <td>${roleBadge(u.role)}</td>
+              <td>${contactCellHtml(u)}</td>
+              <td>${fmtDate(u.createdAt)}</td>
+              <td>
+                ${u.id === session.uid ? '<span class="wtc-tag">You</span>' :
+                  `<button class="wtc-btn wtc-btn-ghost wtc-btn-sm" data-delete-user="${esc(u.id)}" data-delete-name="${esc(u.username)}">Remove</button>`}
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('wtc-trainer-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const username = document.getElementById('wtc-tr-user').value.trim();
+    const pass = document.getElementById('wtc-tr-pass').value;
+    const role = document.getElementById('wtc-tr-role').value;
+    if(username.length < 2){
+      trainerCreateMsg = {ok:false, text:'Enter a display name.'};
+      drawAccounts(); return;
+    }
+    if(pass.length < 6){
+      trainerCreateMsg = {ok:false, text:'Password must be at least 6 characters.'};
+      drawAccounts(); return;
+    }
+    const contact = readContactFields('wtc-tr');
+    if(!validEmail(contact.email)){
+      trainerCreateMsg = {ok:false, text:'Enter a valid email address.'};
+      drawAccounts(); return;
+    }
+    try{
+      await createStaffAccount({ email: contact.email, password: pass, username, phone: contact.phone, social: contact.social, role });
+      trainerCreateMsg = {ok:true, text:`${role==='admin'?'Admin':'Trainer'} account "${username}" created.`};
+      await loadUsers();
+      drawAccounts();
+    }catch(err){
+      trainerCreateMsg = {ok:false, text: err.message || 'Could not create that account.'};
+      drawAccounts();
+    }
+  });
+
+  document.querySelectorAll('[data-delete-user]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const uid = btn.dataset.deleteUser;
+      const name = btn.dataset.deleteName;
+      if(!confirm(`Remove the account "${name}"? This revokes their access immediately. Their login itself isn't deleted -- extend the backend if you also want that.`)) return;
+      await fsDelete('users', uid);
+      await fsDelete('profiles', uid);
+      await loadUsers();
+      trainerCreateMsg = {ok:true, text:`Account "${name}" removed.`};
+      drawAccounts();
+    });
+  });
+}
+
+init();
+</script>
