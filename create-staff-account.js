@@ -1,6 +1,6 @@
 // netlify/functions/create-staff-account.js
 //
-// Called from the client when an admin creates a trainer or admin account.
+// Called from the client when an admin creates a coach or admin account.
 // Runs server-side with Firebase Admin privileges, so it can:
 //   1. verify the caller is really signed in and really an admin
 //   2. create the new Auth user + Firestore user doc + role claim
@@ -37,8 +37,8 @@ exports.handler = async (event) => {
 
     const { email, password, username, phone, social, role } = JSON.parse(event.body || '{}');
 
-    if (!['trainer', 'admin'].includes(role)) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'role must be trainer or admin' }) };
+    if (!['coach', 'admin'].includes(role)) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'role must be coach or admin' }) };
     }
     if (!email || !password || !username) {
       return { statusCode: 400, body: JSON.stringify({ error: 'email, password, and username are required' }) };

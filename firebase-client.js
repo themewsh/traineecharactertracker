@@ -8,7 +8,8 @@ import {
   signOut, onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 import {
-  getFirestore, doc, setDoc, getDoc, deleteDoc, collection, getDocs
+  getFirestore, doc, setDoc, getDoc, deleteDoc, collection, getDocs,
+  query, where
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 import {
   getStorage, ref, uploadBytes, getDownloadURL, deleteObject
@@ -81,6 +82,53 @@ export async function fsListAll(collectionName) {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
+// Returns every document in a top-level collection matching a simple where
+// clause, e.g. every show a given trainee is booked on:
+//   fsQuery('shows', 'participantUids', 'array-contains', uid)
+export async function fsQuery(collectionName, field, op, value) {
+  const q = query(collection(db, collectionName), where(field, op, value));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+// Generates a fresh document id in a top-level collection without writing
+// anything yet -- use this to mint a showId before the first fsSet('shows', id, ...).
+export function newId(collectionName) {
+  return doc(collection(db, collectionName)).id;
+}
+
+/* ---------------- firestore: shows/{showId}/matches/{matchId} ----------------
+   Matches live in a subcollection under their show, so they get their own
+   small set of helpers rather than reusing the flat fsGet/fsSet above. */
+
+export async function fsMatchesList(showId) {
+  const snap = await getDocs(collection(db, 'shows', showId, 'matches'));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+
+export function newMatchId(showId) {
+  return doc(collection(db, 'shows', showId, 'matches')).id;
+}
+
+export async function fsMatchSet(showId, matchId, data) {
+  await setDoc(doc(db, 'shows', showId, 'matches', matchId), data, { merge: false });
+}
+
+export async function fsMatchDelete(showId, matchId) {
+  await deleteDoc(doc(db, 'shows', showId, 'matches', matchId));
+}
+
+// Deletes a show and every match underneath it -- Firestore doesn't cascade
+// subcollection deletes on its own, so the client has to clean both up.
+export async function deleteShowCascade(showId) {
+  const matches = await fsMatchesList(showId);
+  for (const m of matches) {
+    await deleteDoc(doc(db, 'shows', showId, 'matches', m.id));
+  }
+  await deleteDoc(doc(db, 'shows', showId));
+}
+
 /* ---------------- storage: photo + theme song uploads ----------------
    Replaces the old canvas-compression + base64-chunking approach. Upload the
    real File object, store the resulting URL on the profile doc. */
@@ -99,7 +147,7 @@ export async function uploadThemeSong(uid, file) {
   return await getDownloadURL(fileRef);
 }
 
-/* ---------------- admin: creating trainer/admin accounts ----------------
+/* ---------------- admin: creating coach/admin accounts ----------------
    This can't be done client-side (a client can only ever create its own
    trainee account -- see firestore.rules). It calls the Netlify function,
    which uses the Firebase Admin SDK to do it securely. */

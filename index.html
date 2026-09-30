@@ -40,11 +40,11 @@
 <div class="wtc-root">
   <div id="wtc-app" class="wtc-scroll"></div>
 </div>
-<script type="module" src="firebase-client.js"></script>
 <script type="module">
 import {
   watchAuthState, login, registerTrainee, logout,
-  fsGet, fsSet, fsDelete, fsListAll,
+  fsGet, fsSet, fsDelete, fsListAll, fsQuery, newId,
+  fsMatchesList, newMatchId, fsMatchSet, fsMatchDelete, deleteShowCascade,
   uploadPhoto, uploadThemeSong, createStaffAccount
 } from './firebase-client.js';
 
@@ -53,6 +53,7 @@ function esc(s){
 }
 function nl2br(s){ return esc(s).replace(/\n/g,'<br>'); }
 function fmtDate(ts){ if(!ts) return ''; try{ return new Date(ts).toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'}); }catch(e){ return ''; } }
+function isCoach(role){ return role === 'coach' || role === 'trainer'; }
 function validEmail(e){ return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
 
 /* Maps Firebase Auth error codes to plain-language messages. */
@@ -132,13 +133,15 @@ function init(){
 
 /* ---------------- render: shell pieces ---------------- */
 function navBar(active){
-  const roleLabel = session.role === 'admin' ? 'Admin' : (session.role === 'trainer' ? 'Trainer' : 'Trainee');
-  const roleColor = session.role === 'admin' ? 'var(--gold)' : (session.role === 'trainer' ? 'var(--blue)' : 'var(--amber)');
+  const roleLabel = session.role === 'admin' ? 'Admin' : (isCoach(session.role) ? 'Coach' : 'Trainee');
+  const roleColor = session.role === 'admin' ? 'var(--gold)' : (isCoach(session.role) ? 'var(--blue)' : 'var(--amber)');
   let tabs = '';
   if(session.role === 'trainee'){
-    tabs = `<button class="wtc-navtab ${active==='profile'?'active':''}" data-nav="profile">My profile</button>`;
+    tabs = `<button class="wtc-navtab ${active==='profile'?'active':''}" data-nav="profile">My profile</button>`
+         + `<button class="wtc-navtab ${active==='shows'?'active':''}" data-nav="shows">Shows</button>`;
   } else {
-    tabs = `<button class="wtc-navtab ${active==='roster'?'active':''}" data-nav="roster">Roster</button>`;
+    tabs = `<button class="wtc-navtab ${active==='roster'?'active':''}" data-nav="roster">Roster</button>`
+         + `<button class="wtc-navtab ${active==='shows'?'active':''}" data-nav="shows">Shows</button>`;
     if(session.role === 'admin'){
       tabs += `<button class="wtc-navtab ${active==='accounts'?'active':''}" data-nav="accounts">Accounts</button>`;
     }
@@ -252,6 +255,20 @@ function styleBlock(){
   .wtc-tabs-sub{display:flex;gap:8px;margin-bottom:20px;}
   .wtc-tabs-sub button{background:transparent;border:1px solid var(--line);color:var(--muted);padding:8px 14px;border-radius:6px;font-size:13px;font-weight:600;}
   .wtc-tabs-sub button.active{background:var(--panel);border-color:var(--gold-dim);color:var(--gold);}
+  .wtc-show-card{display:flex;justify-content:space-between;align-items:center;gap:14px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:12px;cursor:pointer;transition:border-color .12s ease;}
+  .wtc-show-card:hover{border-color:var(--gold);}
+  .wtc-show-title{font-family:var(--font-display);letter-spacing:.5px;font-size:20px;margin:0 0 4px;color:var(--canvas);}
+  .wtc-show-meta{font-size:12.5px;color:var(--muted);}
+  .wtc-match{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:12px;}
+  .wtc-match.mine{border-color:var(--gold);}
+  .wtc-match-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;}
+  .wtc-match-type{font-family:var(--font-display);letter-spacing:.5px;font-size:16px;color:var(--gold);}
+  .wtc-match-actions{display:flex;gap:6px;flex-wrap:wrap;}
+  .wtc-chip{display:inline-block;background:var(--ink-2);border:1px solid var(--line);border-radius:20px;padding:5px 12px;font-size:13px;color:var(--cream-text);}
+  .wtc-vs{margin:0 8px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);}
+  .wtc-pick-list{max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:var(--ink-2);padding:6px 10px;}
+  .wtc-pick-row{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:14px;color:var(--cream-text);}
+  .wtc-you{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--gold);}
   </style>`;
 }
 
@@ -272,8 +289,8 @@ function renderAuth(){
       ${authMode==='login' ? renderLoginForm() : renderRegisterForm()}
     </div>
     <div class="wtc-demo-note">
-      There are three account types: trainee, trainer, and admin. Trainee accounts are self-serve here. Trainer and admin accounts can only be created by an existing admin, from the Accounts tab.
-      <br><br>Sign in with your email address. Trainee profiles are private &mdash; only you and your trainers/admins can see them.
+      There are three account types: trainee, coach, and admin. Trainee accounts are self-serve here. Coach and admin accounts can only be created by an existing admin, from the Accounts tab.
+      <br><br>Sign in with your email address. Trainee profiles are private &mdash; only you and your coaches/admins can see them, enforced by the backend, not just by this page.
     </div>
   </div>`;
 
@@ -319,7 +336,7 @@ function readContactFields(prefix){
 function renderRegisterForm(){
   return `
   ${regError ? `<div class="wtc-error">${esc(regError)}</div>` : ''}
-  <div class="wtc-note" style="margin-bottom:14px;">This creates a trainee account. Trainee profiles are private &mdash; only you and your trainers/admins can see them. You'll log in with your email.</div>
+  <div class="wtc-note" style="margin-bottom:14px;">This creates a trainee account. Trainee profiles are private &mdash; only you and your coaches/admins can see them. You'll log in with your email.</div>
   <form id="wtc-register-form">
     <div class="wtc-field"><label>Choose a display name</label><input type="text" id="wtc-reg-user" required></div>
     <div class="wtc-field"><label>Choose a password</label><input type="password" id="wtc-reg-pass" required></div>
@@ -396,6 +413,7 @@ function wireNav(active){
       const target = btn.dataset.nav;
       if(target==='profile') renderTraineeScreen();
       else if(target==='roster') renderRosterScreen();
+      else if(target==='shows') renderShowsScreen();
       else if(target==='accounts') renderAccountsScreen();
     });
   });
@@ -780,7 +798,7 @@ function wireProfileForm(existing){
   });
 }
 
-/* ---------------- ROSTER SCREEN (trainer + admin) ---------------- */
+/* ---------------- ROSTER SCREEN (coach + admin) ---------------- */
 async function loadRoster(){
   const docs = await fsListAll('profiles');
   const list = docs.map(d => ({ uid: d.id, username: d.username || d.id, profile: d }));
@@ -903,8 +921,9 @@ function contactCellHtml(u){
 }
 
 function roleBadge(role){
-  const color = role==='admin' ? 'var(--gold)' : (role==='trainer' ? 'var(--blue)' : 'var(--amber)');
-  return `<span class="wtc-role-chip" style="--chip:${color}">${esc(role)}</span>`;
+  const color = role==='admin' ? 'var(--gold)' : (isCoach(role) ? 'var(--blue)' : 'var(--amber)');
+  const label = isCoach(role) ? 'coach' : role;
+  return `<span class="wtc-role-chip" style="--chip:${color}">${esc(label)}</span>`;
 }
 
 function drawAccounts(){
@@ -914,7 +933,7 @@ function drawAccounts(){
 
     <div class="wtc-card" style="margin-bottom:18px;">
       <h3 class="wtc-section-title">Create a staff account</h3>
-      <div class="wtc-note" style="margin-bottom:12px;">There are three account types. Trainees self-register. Trainer and admin accounts can only be created here, by an existing admin. Trainers can browse every trainee profile; admins can additionally manage accounts.</div>
+      <div class="wtc-note" style="margin-bottom:12px;">There are three account types. Trainees self-register. Coach and admin accounts can only be created here, by an existing admin. Coaches can browse every trainee profile and build shows and matches; admins can additionally manage accounts.</div>
       ${trainerCreateMsg.text ? `<div class="${trainerCreateMsg.ok?'wtc-success':'wtc-error'}">${esc(trainerCreateMsg.text)}</div>` : ''}
       <form id="wtc-trainer-form">
         <div class="wtc-row3">
@@ -923,7 +942,7 @@ function drawAccounts(){
           <div class="wtc-field">
             <label>Role</label>
             <select id="wtc-tr-role">
-              <option value="trainer">Trainer</option>
+              <option value="coach">Coach</option>
               <option value="admin">Admin</option>
             </select>
           </div>
@@ -978,7 +997,7 @@ function drawAccounts(){
     }
     try{
       await createStaffAccount({ email: contact.email, password: pass, username, phone: contact.phone, social: contact.social, role });
-      trainerCreateMsg = {ok:true, text:`${role==='admin'?'Admin':'Trainer'} account "${username}" created.`};
+      trainerCreateMsg = {ok:true, text:`${role==='admin'?'Admin':'Coach'} account "${username}" created.`};
       await loadUsers();
       drawAccounts();
     }catch(err){
@@ -999,6 +1018,336 @@ function drawAccounts(){
       drawAccounts();
     });
   });
+}
+
+/* ---------------- SHOWS + MATCHES ---------------- */
+
+const MATCH_TYPES = ['Singles','Tag Team','Triple Threat','Fatal 4-Way','Battle Royal','Handicap','Other'];
+
+let showsCache = [];        // shows this user can see, newest first
+let showDetail = null;      // { show, matches } for the open show, or null
+let showFormOpen = false;   // "new show" form visible? (coach/admin)
+let showCreateMsg = '';
+let matchFormOpen = null;   // matchId being edited, or 'new', or null
+let matchCreateMsg = '';
+
+async function loadShowsForCurrentUser(){
+  if(session.role === 'trainee'){
+    showsCache = await fsQuery('shows', 'participantUids', 'array-contains', session.uid);
+  } else {
+    showsCache = await fsListAll('shows');
+  }
+  showsCache.sort((a,b)=> (b.date||'').localeCompare(a.date||'') || (b.createdAt||0)-(a.createdAt||0));
+}
+
+async function renderShowsScreen(){
+  const app = document.getElementById('wtc-app');
+  app.innerHTML = `${styleBlock()}${navBar('shows')}
+  <div id="wtc-shows-body"><div class="wtc-note">Loading shows&hellip;</div></div>`;
+  wireNav('shows');
+  showDetail = null; showFormOpen = false; showCreateMsg='';
+  await loadShowsForCurrentUser();
+  drawShowsList();
+}
+
+function drawShowsList(){
+  const body = document.getElementById('wtc-shows-body');
+  const canManage = isCoach(session.role) || session.role === 'admin';
+
+  body.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <h2 style="font-family:var(--font-display);letter-spacing:.5px;margin:0;color:var(--canvas);">Shows</h2>
+      ${canManage ? `<button class="wtc-btn" id="wtc-new-show-btn">+ New show</button>` : ''}
+    </div>
+    ${!canManage ? `<div class="wtc-note" style="margin-bottom:16px;">Shows you're booked on appear here.</div>` : ''}
+
+    ${showFormOpen ? showFormHtml() : ''}
+
+    ${showsCache.length ? showsCache.map(showCardHtml).join('') : `<div class="wtc-empty">${canManage ? 'No shows yet. Create one to start booking matches.' : "You're not booked on any shows yet."}</div>`}
+  `;
+
+  if(canManage){
+    document.getElementById('wtc-new-show-btn').addEventListener('click', ()=>{
+      showFormOpen = !showFormOpen; showCreateMsg='';
+      drawShowsList();
+    });
+    const form = document.getElementById('wtc-show-form');
+    if(form){
+      form.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        const title = document.getElementById('f-show-title').value.trim();
+        const date = document.getElementById('f-show-date').value;
+        const venue = document.getElementById('f-show-venue').value.trim();
+        const notes = document.getElementById('f-show-notes').value.trim();
+        if(!title){ showCreateMsg = 'Give the show a name.'; drawShowsList(); return; }
+        const id = newId('shows');
+        try{
+          await fsSet('shows', id, {
+            title, date, venue, notes,
+            participantUids: [], matchCount: 0,
+            createdBy: {uid: session.uid, username: session.username},
+            createdAt: Date.now(), updatedAt: Date.now()
+          });
+          showFormOpen = false; showCreateMsg='';
+          await loadShowsForCurrentUser();
+          openShowDetail(id);
+        }catch(err){
+          showCreateMsg = err.message || 'Could not create the show.';
+          drawShowsList();
+        }
+      });
+    }
+  }
+
+  document.querySelectorAll('[data-open-show]').forEach(el=>{
+    el.addEventListener('click', ()=> openShowDetail(el.dataset.openShow));
+  });
+}
+
+function showFormHtml(){
+  return `
+  <div class="wtc-card" style="margin-bottom:18px;">
+    <h3 class="wtc-section-title">New show</h3>
+    ${showCreateMsg ? `<div class="wtc-error">${esc(showCreateMsg)}</div>` : ''}
+    <form id="wtc-show-form">
+      <div class="wtc-row3">
+        <div class="wtc-field"><label>Show name</label><input type="text" id="f-show-title" required></div>
+        <div class="wtc-field"><label>Date</label><input type="date" id="f-show-date"></div>
+        <div class="wtc-field"><label>Venue</label><input type="text" id="f-show-venue"></div>
+      </div>
+      <div class="wtc-field"><label>Notes</label><textarea id="f-show-notes" placeholder="Optional -- theme, card focus, anything the roster should know"></textarea></div>
+      <button type="submit" class="wtc-btn">Create show</button>
+    </form>
+  </div>`;
+}
+
+function showCardHtml(s){
+  return `
+  <div class="wtc-show-card" data-open-show="${esc(s.id)}">
+    <div>
+      <p class="wtc-show-title">${esc(s.title)||'Untitled show'}</p>
+      <div class="wtc-show-meta">${s.date ? esc(s.date) : 'No date set'}${s.venue ? ' &middot; '+esc(s.venue) : ''}</div>
+    </div>
+    <div class="wtc-show-meta">${s.matchCount||0} match${(s.matchCount||0)===1?'':'es'}</div>
+  </div>`;
+}
+
+async function openShowDetail(showId){
+  const body = document.getElementById('wtc-shows-body');
+  body.innerHTML = `<div class="wtc-note">Loading show&hellip;</div>`;
+  const show = await fsGet('shows', showId);
+  const matches = await fsMatchesList(showId);
+  showDetail = {id: showId, show, matches};
+  matchFormOpen = null; matchCreateMsg='';
+  if(isCoach(session.role) || session.role === 'admin'){
+    if(!rosterProfiles.length) await loadRoster();
+    drawShowDetailManage();
+  } else {
+    drawShowDetailReadOnly();
+  }
+}
+
+function backToShowsBtn(){
+  return `<button class="wtc-btn wtc-btn-ghost wtc-btn-sm" id="wtc-back-shows">&larr; All shows</button>`;
+}
+function wireBackToShows(){
+  document.getElementById('wtc-back-shows').addEventListener('click', ()=>{ showDetail=null; drawShowsList(); });
+}
+
+function drawShowDetailReadOnly(){
+  const body = document.getElementById('wtc-shows-body');
+  const {show, matches} = showDetail;
+  body.innerHTML = `
+    <div style="margin-bottom:16px;">${backToShowsBtn()}</div>
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <p class="wtc-show-title" style="color:var(--gold);">${esc(show.title)}</p>
+      <div class="wtc-show-meta">${show.date ? esc(show.date) : 'No date set'}${show.venue ? ' &middot; '+esc(show.venue) : ''}</div>
+      ${show.notes ? `<p style="margin-top:12px;color:var(--cream-text);">${nl2br(show.notes)}</p>` : ''}
+    </div>
+    ${matches.length ? matches.map(m=>matchCardHtml(m,false)).join('') : `<div class="wtc-empty">No matches booked yet.</div>`}
+  `;
+  wireBackToShows();
+}
+
+function matchCardHtml(m, manageable){
+  const names = (m.participantUids||[]).map((uid,i)=> m.participantNames && m.participantNames[i] ? m.participantNames[i] : 'Unknown');
+  const mine = (m.participantUids||[]).includes(session.uid);
+  return `
+  <div class="wtc-match ${mine?'mine':''}">
+    <div class="wtc-match-head">
+      <div>
+        <span class="wtc-match-type">${esc(m.matchType==='Other' ? (m.matchTypeOther||'Match') : m.matchType)}</span>
+        ${m.stipulation ? `<span class="wtc-tag" style="margin-left:8px;">${esc(m.stipulation)}</span>` : ''}
+        ${mine ? `<span class="wtc-you" style="margin-left:8px;">You're in this match</span>` : ''}
+      </div>
+      ${manageable ? `<div class="wtc-match-actions">
+        <button class="wtc-btn wtc-btn-ghost wtc-btn-sm" data-edit-match="${esc(m.id)}">Edit</button>
+        <button class="wtc-btn wtc-btn-ghost wtc-btn-sm" data-delete-match="${esc(m.id)}">Delete</button>
+      </div>` : ''}
+    </div>
+    <div>${names.map(n=>`<span class="wtc-chip">${esc(n)}</span>`).join('<span class="wtc-vs">vs</span>')}</div>
+    ${m.notes ? `<p style="margin-top:10px;font-size:13px;color:var(--muted);">${nl2br(m.notes)}</p>` : ''}
+  </div>`;
+}
+
+function drawShowDetailManage(){
+  const body = document.getElementById('wtc-shows-body');
+  const {show, matches} = showDetail;
+  body.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      ${backToShowsBtn()}
+      <button class="wtc-btn wtc-btn-ghost wtc-btn-sm" id="wtc-delete-show">Delete show</button>
+    </div>
+    <div class="wtc-card" style="margin-bottom:18px;">
+      <p class="wtc-show-title" style="color:var(--gold);">${esc(show.title)}</p>
+      <div class="wtc-show-meta">${show.date ? esc(show.date) : 'No date set'}${show.venue ? ' &middot; '+esc(show.venue) : ''}</div>
+      ${show.notes ? `<p style="margin-top:12px;color:var(--cream-text);">${nl2br(show.notes)}</p>` : ''}
+    </div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 14px;">
+      <h3 style="font-family:var(--font-display);letter-spacing:.5px;margin:0;color:var(--canvas);">Card</h3>
+      ${matchFormOpen ? '' : `<button class="wtc-btn wtc-btn-sm" id="wtc-add-match-btn">+ Add match</button>`}
+    </div>
+
+    ${matchFormOpen ? matchFormHtml(matchFormOpen==='new' ? null : matches.find(m=>m.id===matchFormOpen)) : ''}
+
+    ${matches.length ? matches.map(m=>matchCardHtml(m,true)).join('') : (matchFormOpen ? '' : `<div class="wtc-empty">No matches yet. Add the first one.</div>`)}
+  `;
+  wireBackToShows();
+
+  document.getElementById('wtc-delete-show').addEventListener('click', async ()=>{
+    if(!confirm(`Delete "${show.title}" and every match on it? This can't be undone.`)) return;
+    await deleteShowCascade(show.id || showDetail.id);
+    showDetail = null;
+    await loadShowsForCurrentUser();
+    drawShowsList();
+  });
+
+  const addBtn = document.getElementById('wtc-add-match-btn');
+  if(addBtn){
+    addBtn.addEventListener('click', ()=>{ matchFormOpen='new'; matchCreateMsg=''; drawShowDetailManage(); });
+  }
+  document.querySelectorAll('[data-edit-match]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ matchFormOpen = btn.dataset.editMatch; matchCreateMsg=''; drawShowDetailManage(); });
+  });
+  document.querySelectorAll('[data-delete-match]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      if(!confirm('Remove this match from the card?')) return;
+      await fsMatchDelete(showDetail.id, btn.dataset.deleteMatch);
+      await refreshShowDetail();
+    });
+  });
+
+  wireMatchForm();
+}
+
+function matchFormHtml(existingMatch){
+  const m = existingMatch || {matchType:'Singles', matchTypeOther:'', stipulation:'', notes:'', participantUids:[]};
+  const selected = new Set(m.participantUids || []);
+  return `
+  <div class="wtc-card" style="margin-bottom:18px;">
+    <h3 class="wtc-section-title">${existingMatch ? 'Edit match' : 'New match'}</h3>
+    ${matchCreateMsg ? `<div class="wtc-error">${esc(matchCreateMsg)}</div>` : ''}
+    <form id="wtc-match-form">
+      <div class="wtc-row2">
+        <div class="wtc-field">
+          <label>Match type</label>
+          <select id="f-match-type">
+            ${MATCH_TYPES.map(t=>`<option value="${t}" ${m.matchType===t?'selected':''}>${t}</option>`).join('')}
+          </select>
+        </div>
+        <div class="wtc-field" id="f-match-type-other-wrap" style="${m.matchType==='Other'?'':'display:none;'}">
+          <label>Describe the match type</label>
+          <input type="text" id="f-match-type-other" value="${esc(m.matchTypeOther||'')}">
+        </div>
+      </div>
+      <div class="wtc-field"><label>Stipulation <span class="wtc-hint">&mdash; optional</span></label><input type="text" id="f-match-stip" value="${esc(m.stipulation||'')}" placeholder="No Disqualification, Ladder Match, etc."></div>
+      <div class="wtc-field">
+        <label>Participants <span class="wtc-hint">&mdash; pick at least 2</span></label>
+        <div class="wtc-pick-list">
+          ${rosterProfiles.length ? rosterProfiles.map(r=>`
+            <label class="wtc-pick-row">
+              <input type="checkbox" class="f-match-participant" value="${esc(r.uid)}" ${selected.has(r.uid)?'checked':''}>
+              ${esc(r.profile.ringName || r.username)}
+            </label>`).join('') : `<div class="wtc-note">No trainee profiles yet.</div>`}
+        </div>
+      </div>
+      <div class="wtc-field"><label>Notes <span class="wtc-hint">&mdash; optional, finish notes etc.</span></label><textarea id="f-match-notes">${esc(m.notes||'')}</textarea></div>
+      <div style="display:flex;gap:10px;">
+        <button type="submit" class="wtc-btn">${existingMatch ? 'Save match' : 'Add match'}</button>
+        <button type="button" class="wtc-btn wtc-btn-ghost" id="wtc-cancel-match">Cancel</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function wireMatchForm(){
+  const form = document.getElementById('wtc-match-form');
+  if(!form) return;
+
+  const typeSel = document.getElementById('f-match-type');
+  typeSel.addEventListener('change', ()=>{
+    document.getElementById('f-match-type-other-wrap').style.display = typeSel.value==='Other' ? '' : 'none';
+  });
+  document.getElementById('wtc-cancel-match').addEventListener('click', ()=>{
+    matchFormOpen=null; matchCreateMsg=''; drawShowDetailManage();
+  });
+
+  form.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const checked = Array.from(document.querySelectorAll('.f-match-participant:checked')).map(i=>i.value);
+    if(checked.length < 2){
+      matchCreateMsg = 'Pick at least 2 participants.';
+      drawShowDetailManage();
+      return;
+    }
+    const participantNames = checked.map(uid=>{
+      const r = rosterProfiles.find(x=>x.uid===uid);
+      return r ? (r.profile.ringName || r.username) : 'Unknown';
+    });
+    const matchType = document.getElementById('f-match-type').value;
+    const data = {
+      matchType,
+      matchTypeOther: matchType==='Other' ? document.getElementById('f-match-type-other').value.trim() : '',
+      stipulation: document.getElementById('f-match-stip').value.trim(),
+      notes: document.getElementById('f-match-notes').value.trim(),
+      participantUids: checked,
+      participantNames,
+      order: (matchFormOpen==='new') ? showDetail.matches.length : (showDetail.matches.find(x=>x.id===matchFormOpen)||{}).order || 0,
+      createdAt: (matchFormOpen==='new') ? Date.now() : (showDetail.matches.find(x=>x.id===matchFormOpen)||{}).createdAt || Date.now()
+    };
+    try{
+      const matchId = matchFormOpen==='new' ? newMatchId(showDetail.id) : matchFormOpen;
+      await fsMatchSet(showDetail.id, matchId, data);
+      await recomputeShowAggregates(showDetail.id);
+      matchFormOpen=null; matchCreateMsg='';
+      await refreshShowDetail();
+    }catch(err){
+      matchCreateMsg = err.message || 'Could not save the match.';
+      drawShowDetailManage();
+    }
+  });
+}
+
+async function recomputeShowAggregates(showId){
+  const matches = await fsMatchesList(showId);
+  const uids = new Set();
+  matches.forEach(m=> (m.participantUids||[]).forEach(u=>uids.add(u)));
+  const current = await fsGet('shows', showId);
+  await fsSet('shows', showId, {
+    ...current,
+    participantUids: Array.from(uids),
+    matchCount: matches.length,
+    updatedAt: Date.now()
+  });
+}
+
+async function refreshShowDetail(){
+  const showId = showDetail.id;
+  const show = await fsGet('shows', showId);
+  const matches = await fsMatchesList(showId);
+  showDetail = {id: showId, show, matches};
+  drawShowDetailManage();
 }
 
 init();

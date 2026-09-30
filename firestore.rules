@@ -7,15 +7,17 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
     }
     function isAdmin() { return isSignedIn() && myRole() == 'admin'; }
-    function isTrainerOrAdmin() { return isSignedIn() && (myRole() == 'trainer' || myRole() == 'admin'); }
+    // 'trainer' is kept as a legacy alias so existing accounts created before the
+    // coach rename keep working without any manual data migration.
+    function isCoachOrAdmin() { return isSignedIn() && (myRole() == 'coach' || myRole() == 'trainer' || myRole() == 'admin'); }
 
     // users/{uid} -- account + contact info
     match /users/{uid} {
-      // trainees/trainers/admins can read their own doc; trainers/admins can read everyone's
-      allow read: if isSignedIn() && (request.auth.uid == uid || isTrainerOrAdmin());
+      // trainees/coaches/admins can read their own doc; coaches/admins can read everyone's
+      allow read: if isSignedIn() && (request.auth.uid == uid || isCoachOrAdmin());
 
       // self-registration is only ever allowed to create a TRAINEE account.
-      // trainer/admin accounts are created server-side (Admin SDK bypasses these rules).
+      // coach/admin accounts are created server-side (Admin SDK bypasses these rules).
       allow create: if isSignedIn()
                     && request.auth.uid == uid
                     && request.resource.data.role == 'trainee';
@@ -31,10 +33,30 @@ service cloud.firestore {
 
     // profiles/{uid} -- the wrestling character sheet
     match /profiles/{uid} {
-      // trainee sees only their own profile; trainers/admins see everyone's
-      allow read: if isSignedIn() && (request.auth.uid == uid || isTrainerOrAdmin());
+      // trainee sees only their own profile; coaches/admins see everyone's
+      allow read: if isSignedIn() && (request.auth.uid == uid || isCoachOrAdmin());
       // only the owning trainee can create/edit their own profile
       allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // shows/{showId} -- a show roster. participantUids is a denormalized union of
+    // every match's participants on this show, kept in sync by the client whenever
+    // matches are added/edited/deleted. It's what lets a trainee see only shows
+    // they're actually booked on.
+    match /shows/{showId} {
+      allow read: if isCoachOrAdmin()
+                  || (isSignedIn() && request.auth.uid in resource.data.participantUids);
+      allow create, update, delete: if isCoachOrAdmin();
+
+      // shows/{showId}/matches/{matchId} -- individual matches on the card.
+      // A trainee who can see the show (i.e. is booked somewhere on it) can see
+      // every match on that card, not just their own -- same as a real card sheet.
+      match /matches/{matchId} {
+        allow read: if isCoachOrAdmin()
+                    || (isSignedIn()
+                        && request.auth.uid in get(/databases/$(database)/documents/shows/$(showId)).data.participantUids);
+        allow create, update, delete: if isCoachOrAdmin();
+      }
     }
   }
 }
